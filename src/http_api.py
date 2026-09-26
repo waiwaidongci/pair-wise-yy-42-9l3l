@@ -71,7 +71,11 @@ def make_handler(service: Service, static_dir: str):
                 status = 400
             else:
                 status = 500
-            self._json(status, {"error": exc.__class__.__name__, "message": str(exc)})
+            payload = {"error": exc.__class__.__name__, "message": str(exc)}
+            details = getattr(exc, "details", None)
+            if details:
+                payload["details"] = details
+            self._json(status, payload)
 
         def do_GET(self) -> None:
             try:
@@ -84,6 +88,23 @@ def make_handler(service: Service, static_dir: str):
                     actor, role = self._identity()
                     del actor
                     self._json(200, {"items": service.list_items(role)})
+                elif path.startswith("/api/items/") and path.endswith("/fire-segments"):
+                    item_id = int(path.split("/")[3])
+                    actor, role = self._identity()
+                    self._json(200, service.list_firelines(role, item_id))
+                elif path == "/api/firelines":
+                    actor, role = self._identity()
+                    query = parse_qs(urlparse(self.path).query)
+                    item_param = query.get("item_id", [None])[0]
+                    item_id = int(item_param) if item_param else None
+                    self._json(200, service.list_firelines(role, item_id))
+                elif path == "/api/segment-conflicts":
+                    actor, role = self._identity()
+                    query = parse_qs(urlparse(self.path).query)
+                    item_param = query.get("item_id", [None])[0]
+                    item_id = int(item_param) if item_param else None
+                    status = query.get("status", [None])[0]
+                    self._json(200, {"conflicts": service.list_conflicts(role, item_id, status)})
                 elif path.startswith("/api/items/") and path.endswith("/records"):
                     item_id = int(path.split("/")[3])
                     actor, role = self._identity()
@@ -110,6 +131,9 @@ def make_handler(service: Service, static_dir: str):
                 body = self._body()
                 if path == "/api/items":
                     self._json(201, service.create_item(body, actor, role))
+                elif path.startswith("/api/items/") and path.endswith("/fire-segments"):
+                    item_id = int(path.split("/")[3])
+                    self._json(201, service.register_fire_segment(item_id, body, actor, role))
                 elif path.startswith("/api/items/") and path.endswith("/records"):
                     item_id = int(path.split("/")[3])
                     self._json(201, service.add_record(item_id, body, actor, role))
@@ -119,6 +143,26 @@ def make_handler(service: Service, static_dir: str):
                     expected = body.get("expected_version")
                     self._json(200, service.transition(
                         item_id, target, expected, actor, role))
+                else:
+                    self._json(404, {"error": "not_found"})
+            except Exception as exc:
+                self._send_error(exc)
+
+        def do_PATCH(self) -> None:
+            try:
+                path = urlparse(self.path).path
+                actor, role = self._identity()
+                body = self._body()
+                parts = [p for p in path.split("/") if p]
+                if len(parts) == 5 and parts[0] == "api" and parts[1] == "items" \
+                        and parts[3] == "fire-segments":
+                    item_id = int(parts[2]); segment_id = int(parts[4])
+                    self._json(200, service.update_fire_segment(
+                        item_id, segment_id, body, actor, role))
+                elif len(parts) == 3 and parts[0] == "api" \
+                        and parts[1] == "segment-conflicts":
+                    conflict_id = int(parts[2])
+                    self._json(200, service.resolve_conflict(conflict_id, actor, role))
                 else:
                     self._json(404, {"error": "not_found"})
             except Exception as exc:

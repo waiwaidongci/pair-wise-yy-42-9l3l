@@ -30,9 +30,24 @@ python3 app.py --db ./data.db --port 8319
 - `GET /api/items/{id}`
 - `POST /api/items/{id}/records`
 - `POST /api/items/{id}/transition`，必须提交`expected_version`
+- `POST /api/items/{id}/fire-segments`：登记火线片段
+- `GET /api/items/{id}/fire-segments`：查看该事件的归并结果
+- `PATCH /api/items/{id}/fire-segments/{seg_id}`：更新火势/阵风/观测时刻
+- `GET /api/firelines`：所有事件的火线归并概览
+- `GET /api/segment-conflicts`：待核冲突（可用`item_id`、`status`过滤）
+- `PATCH /api/segment-conflicts/{id}`：核销待核冲突（incident_commander）
 - `GET /api/audit`
 
 允许角色：field_commander, incident_commander, logistics, viewer。火线长度、风向变化和离线记录数量影响风险等级；同一资源不能同时出现在多个活动任务中。
+
+### 火线片段归并规则
+
+- 登记字段：`site_code`（现场编号，幂等键）、`start_marker`/`end_marker`（起止界桩，整数）、`fire_status`（burning/controlled）、`gust_level`（阵风0-12）、`observed_at`（ISO-8601观测时刻）。
+- **幂等重放**：同一事件、同一现场编号重复上报，无论内容是否变化，都返回第一次登记结果（`replayed=true`），不重复落库。
+- **首尾相接合并**：同事件内界桩相邻或重叠的片段在视图中归并成一段，`merged=true`并列出组成编号；阵风取最大、观测时刻取最新；任一段在燃烧则合并段视为燃烧。
+- **跨事件冲突**：现场编号已被别的未关闭火线占用，或界桩范围与别的未关闭火线重叠，登记被退回（409），响应体`details`说明冲突事件、原因和双方界桩范围，并自动登记一条"待核冲突"（双方事件的列表都可见，重复上报不会重复建单）。归属事件关闭后编号与范围可被新事件使用。
+- **关闭闸门**：事件下存在`burning`片段时，`closed`转换被拒绝；将片段更新为controlled后才能关闭。
+- **时限重算**：有片段时按未控制长度（燃烧中合并段长度之和）和最大阵风重算`fireline_deadline_hours`（1-72小时，越短越紧），并覆盖事件的`deadline_hours`。
 
 ## 测试
 
