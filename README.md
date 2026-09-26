@@ -29,10 +29,20 @@ python3 app.py --db ./data.db --port 8319
 - `POST /api/items`
 - `GET /api/items/{id}`
 - `POST /api/items/{id}/records`
+- `POST /api/items/{id}/segments`，登记火线片段（现场编号、起止界桩、火势状态、阵风等级、观测时刻）
+- `GET /api/items/{id}/segments`，列出归并后的片段与待核冲突
 - `POST /api/items/{id}/transition`，必须提交`expected_version`
 - `GET /api/audit`
 
 允许角色：field_commander, incident_commander, logistics, viewer。火线长度、风向变化和离线记录数量影响风险等级；同一资源不能同时出现在多个活动任务中。
+
+## 火线片段归并
+
+- 同一`field_ref`（现场编号）重放登记时返回第一次的结果，不重复建段。
+- 同一事件内首尾相接（界桩号相邻或重叠）的片段自动合成一段，火势与阵风取观测时刻最新的一次。
+- 片段与别的未关闭事件的火线重叠时退回（409），说明冲突事件并登记为待核冲突。
+- 存在燃烧中（burning/smoldering）片段的事件不能关闭；用新的现场编号补报`contained`等状态后放行。
+- 事件有片段后，响应时限按未控制长度与最大阵风等级重算，列表中可见`merged`合并段与`pending`待核冲突。
 
 ## 测试
 

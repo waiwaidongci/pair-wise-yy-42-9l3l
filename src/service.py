@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from .domain import ensure_role, normalize_severity, require_number, require_text
+from .domain import (ConflictError, ValidationError, ensure_role,
+                     normalize_fire_status, normalize_severity, parse_marker,
+                     require_number, require_text, require_timestamp)
 from .repository import Repository
-from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, RECORD_ROLES, TITLE,
-                    VIEW_ROLES, completion_blockers, escalation_required,
-                    priority_score, response_deadline_hours, role_for_transition,
+from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, MAX_GUST_LEVEL,
+                    RECORD_ROLES, SEGMENT_ROLES, TITLE, VIEW_ROLES,
+                    completion_blockers, escalation_required, priority_score,
+                    response_deadline_hours, role_for_transition,
+                    segment_closure_blockers, segment_deadline_hours,
                     validate_transition)
 
 
@@ -55,6 +59,51 @@ class Service:
         })
         return record
 
+    def register_segment(self, item_id: int, payload: Dict[str, Any], actor: str,
+                         role: str) -> Dict[str, Any]:
+        ensure_role(role, SEGMENT_ROLES)
+        actor = require_text(actor, "actor", 100)
+        field_ref = require_text(payload.get("field_ref"), "field_ref", 100)
+        start_prefix, start_num, start_marker = parse_marker(
+            payload.get("start_marker"), "start_marker")
+        end_prefix, end_num, end_marker = parse_marker(
+            payload.get("end_marker"), "end_marker")
+        if start_prefix != end_prefix:
+            raise ValidationError("起止界桩必须在同一桩线上")
+        if start_num > end_num:
+            raise ValidationError("起点界桩不能大于止点界桩")
+        fire_status = normalize_fire_status(payload.get("fire_status"))
+        gust_level = require_number(payload.get("gust_level", 0), "gust_level")
+        if gust_level > MAX_GUST_LEVEL:
+            raise ValidationError(f"gust_level不能超过{MAX_GUST_LEVEL}")
+        if float(gust_level) != int(gust_level):
+            raise ValidationError("gust_level必须是整数等级")
+        gust_level = int(gust_level)
+        observed_at = require_timestamp(payload.get("observed_at"), "observed_at")
+        outcome = self.repository.register_segment(
+            item_id, field_ref, start_prefix, start_num, end_num, start_marker,
+            end_marker, fire_status, gust_level, observed_at, actor)
+        if outcome["outcome"] == "conflict":
+            self.repository.append_audit("segment_conflict", ENTITY, item_id, actor, {
+                "field_ref": field_ref,
+                "conflicting_item_id": outcome["conflicting_item_id"],
+            })
+            raise ConflictError(outcome["message"])
+        if outcome["outcome"] == "created":
+            segment = outcome["segment"]
+            self.repository.append_audit("segment", ENTITY, item_id, actor, {
+                "segment_id": segment["id"], "field_ref": field_ref,
+                "fire_status": fire_status, "merged": segment["merged"],
+            })
+        return outcome["segment"]
+
+    def list_segments(self, item_id: int, role: str) -> Dict[str, Any]:
+        self._view(role)
+        return {
+            "segments": self.repository.list_segments(item_id),
+            "conflicts": self.repository.list_segment_conflicts(item_id),
+        }
+
     def transition(self, item_id: int, target: str, expected_version: int,
                    actor: str, role: str) -> Dict[str, Any]:
         actor = require_text(actor, "actor", 100)
@@ -64,8 +113,9 @@ class Service:
         if not isinstance(expected_version, int) or expected_version < 1:
             raise ValueError("expected_version必须是正整数")
         blockers = completion_blockers(target, self.repository.open_record_count(item_id))
+        stats = self.repository.segment_stats(item_id)
+        blockers += segment_closure_blockers(target, stats["uncontrolled_segments"])
         if blockers:
-            from .domain import ConflictError
             raise ConflictError("；".join(blockers))
         updated = self.repository.transition_item(item_id, target, expected_version, actor)
         self.repository.append_audit("transition", ENTITY, item_id, actor, {
@@ -91,13 +141,20 @@ class Service:
         ensure_role(role, AUDIT_ROLES)
         return self.repository.list_audit(item_id)
 
-    @staticmethod
-    def enrich(item: Dict[str, Any]) -> Dict[str, Any]:
+    def enrich(self, item: Dict[str, Any]) -> Dict[str, Any]:
         result = dict(item)
         result["priority"] = priority_score(
             item["severity"], item["quantity"], item["threshold"])
-        result["deadline_hours"] = response_deadline_hours(
-            item["severity"], item["quantity"], item["threshold"])
+        stats = self.repository.segment_stats(item["id"])
+        if stats["segments"]:
+            result["deadline_hours"] = segment_deadline_hours(
+                item["severity"], stats["uncontrolled_length"], stats["max_gust_level"])
+        else:
+            result["deadline_hours"] = response_deadline_hours(
+                item["severity"], item["quantity"], item["threshold"])
         result["escalation_required"] = escalation_required(
             item["severity"], item["quantity"], item["threshold"])
+        result["uncontrolled_length"] = stats["uncontrolled_length"]
+        result["max_gust_level"] = stats["max_gust_level"]
+        result["open_segment_count"] = stats["uncontrolled_segments"]
         return result

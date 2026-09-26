@@ -1,5 +1,7 @@
 from __future__ import annotations
+import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, Optional
 class ErrorKind:
     VALIDATION="validation"; NOT_FOUND="not_found"; FORBIDDEN="forbidden"; CONFLICT="conflict"
@@ -11,6 +13,8 @@ class NotFoundError(DomainError): kind=ErrorKind.NOT_FOUND
 class PermissionDenied(DomainError): kind=ErrorKind.FORBIDDEN
 class ConflictError(DomainError): kind=ErrorKind.CONFLICT
 SEVERITIES=['low', 'moderate', 'high', 'extreme']; STATES=['reported', 'active', 'contained', 'controlled', 'closed']; ROLES=['field_commander', 'incident_commander', 'logistics', 'viewer']
+SEGMENT_FIRE_STATES=['burning', 'smoldering', 'contained', 'extinguished']
+MARKER_PATTERN=re.compile(r"^(.*?)(\d+)$")
 @dataclass(frozen=True)
 class Item:
     id:int; title:str; description:str; severity:str; quantity:float; threshold:float; status:str; version:int; external_ref:Optional[str]; created_by:str; created_at:str; updated_at:str
@@ -36,3 +40,16 @@ def require_number(value,field,minimum=0.0):
     return number
 def ensure_role(role,allowed):
     if role not in allowed: raise PermissionDenied("当前角色无权执行该操作")
+def normalize_fire_status(value):
+    if value not in SEGMENT_FIRE_STATES: raise ValidationError("fire_status不在允许范围内")
+    return value
+def parse_marker(value,field="marker"):
+    text=require_text(value,field,50)
+    match=MARKER_PATTERN.match(text)
+    if not match: raise ValidationError(f"{field}必须以桩号数字结尾")
+    return match.group(1),int(match.group(2)),text
+def require_timestamp(value,field="observed_at"):
+    text=require_text(value,field,40)
+    try: datetime.fromisoformat(text.replace("Z","+00:00"))
+    except ValueError: raise ValidationError(f"{field}必须是ISO时间格式")
+    return text
